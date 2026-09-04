@@ -67,7 +67,7 @@ import re
 import sys
 from collections import Counter, defaultdict
 
-__version__ = "1.13.0"
+__version__ = "1.13.1"
 
 _VIEWER_TEMPLATE = r'''<!DOCTYPE html>
 <html lang="en">
@@ -1942,6 +1942,7 @@ class Drawing:
         self.skipped = Counter()
         self.inserts = []     # {name, attribs, layer, m, bbox, pt, geom(minsert only)}
         self.texts = []       # {str, x, y, h, layer, idx}
+        self.hatches = []     # {pattern, layer, bbox} -- for hatch:PATTERN@LAYER anchors
         self.layers = defaultdict(lambda: {"geom": Geom(), "count": 0})
         self._blocks = {}     # block name -> {"geom": local Geom, "bbox", "base"}
         self._lite = {}       # block name -> reduced-detail local Geom
@@ -2003,6 +2004,11 @@ class Drawing:
 
             g = Geom()
             collect_entity(e, g, self.flat, self.tol, self.skipped)
+            if etype == "HATCH":
+                b = g.bbox()
+                if b:
+                    pat = "SOLID" if getattr(e.dxf, "solid_fill", 0) else str(getattr(e.dxf, "pattern_name", "") or "")
+                    self.hatches.append({"pattern": pat, "layer": layer, "bbox": b})
             if etype in ("TEXT", "MTEXT") and g.texts:
                 x, y, h, rot, s = g.texts[0]
                 self.texts.append({"str": s, "x": x, "y": y, "h": h,
@@ -2524,6 +2530,9 @@ PREFER_ALIASES = {"n": "north", "top": "north", "upper": "north", "up": "north",
 #   layer:NAME          the object(s) on that layer (a pathway rectangle, a
 #                       centreline): the centre of their extent, horizontal
 #                       when wider than tall, else vertical
+#   hatch:PATTERN[@LAYER] the hatch(es) with that pattern name (the pathway on
+#                       floor 3 is an ANSI31 hatch on layer 00_Dummy, which
+#                       holds other objects too): the centre of their extent
 #   text:STRING[@LAYER] the position of that text label (a bay ID such as
 #                       "XPH-D" on layer "BAY-ID"): a horizontal line at its Y
 #   Y | x=X | X0,Y0,X1,Y1   plain drawing coordinates, as before
@@ -2536,12 +2545,46 @@ PREFER_ALIASES = {"n": "north", "top": "north", "upper": "north", "up": "north",
 # else. A missing layer or text stops the run with the candidates listed.
 # --------------------------------------------------------------------------
 
+def _extent_ref(boxes, src, ext):
+    """Horizontal or vertical centreline of a set of boxes."""
+    x0 = min(b[0] for b in boxes); y0 = min(b[1] for b in boxes)
+    x1 = max(b[2] for b in boxes); y1 = max(b[3] for b in boxes)
+    ext = f"{ext}, extent X {x0:,.0f}..{x1:,.0f} Y {y0:,.0f}..{y1:,.0f}"
+    if x1 - x0 >= y1 - y0:
+        Y = (y0 + y1) / 2
+        return {"kind": "h", "Y": Y, "src": src, "desc": f"{src}: {ext} -> horizontal line at Y = {Y:,.0f}"}
+    X = (x0 + x1) / 2
+    return {"kind": "v", "X": X, "src": src, "desc": f"{src}: {ext} -> vertical line at X = {X:,.0f}"}
+
+
 def resolve_ref(dwg, spec, flag):
     """A reference line for --aisle / --prefer. Returns {"kind": "h" (Y),
     "v" (X) or "seg" (X0,Y0,X1,Y1), "Y"/"X"/"seg", "desc", "src"} or dies
     with the drawing's candidates listed."""
     s = str(spec).strip()
     low = s.lower().replace(" ", "")
+    if low.startswith("hatch:"):
+        body = s[s.index(":") + 1:].strip()
+        pat, _, layer = body.partition("@")
+        pat, layer = pat.strip(), layer.strip()
+        hits = [h for h in dwg.hatches if mkey(h["pattern"]) == mkey(pat)
+                and (not layer or layer_wanted(h["layer"], [layer], []))]
+        if not hits:
+            avail = Counter((h["pattern"], h["layer"]) for h in dwg.hatches)
+            same = [f"{p} on '{l}' x{n}" for (p, l), n in avail.most_common() if mkey(p) == mkey(pat)][:6]
+            other = [f"{p} on '{l}' x{n}" for (p, l), n in avail.most_common(8)]
+            die(f"{flag} '{spec}': no hatch with pattern '{pat}'" + (f" on layer '{layer}'" if layer else "")
+                + " in the drawing."
+                + (f"\n  That pattern exists on: {', '.join(same)}" if same else "")
+                + (f"\n  Hatch patterns found: {', '.join(other)}" if other else "\n  The drawing has no hatches.")
+                + "\n  --inspect lists hatch patterns per layer.")
+        layers = sorted({h["layer"] for h in hits})
+        src = f"hatch '{hits[0]['pattern']}' on layer '{layers[0]}'" + (f" (+{len(layers) - 1} more layers)" if len(layers) > 1 else "")
+        if len(hits) > 1:
+            parts = "; ".join(f"X {b[0]:,.0f}..{b[2]:,.0f} Y {b[1]:,.0f}..{b[3]:,.0f}" for b in (h["bbox"] for h in hits[:4]))
+            warn(f"{flag}: {len(hits)} hatches match '{body}'; using their combined extent. "
+                 f"Pieces: {parts}{'; …' if len(hits) > 4 else ''}. Add @LAYER or check --inspect if that is wrong.")
+        return _extent_ref([h["bbox"] for h in hits], src, f"{len(hits)} hatch(es)")
     if low.startswith("layer:"):
         pat = s[s.index(":") + 1:].strip()
         names = [n for n in dwg.layers if layer_wanted(n, [pat], [])]
@@ -2558,16 +2601,14 @@ def resolve_ref(dwg, spec, flag):
             die(f"{flag} '{spec}': no layer '{pat}' with geometry in the drawing."
                 + (f"\n  Similar layer names: {', '.join(close)}" if close else "")
                 + "\n  --inspect lists all layers.")
-        x0 = min(b[0] for b in boxes); y0 = min(b[1] for b in boxes)
-        x1 = max(b[2] for b in boxes); y1 = max(b[3] for b in boxes)
-        w, h = x1 - x0, y1 - y0
         src = f"layer '{names[0]}'" + (f" (+{len(names) - 1} more)" if len(names) > 1 else "")
-        ext = f"{len(boxes)} object(s), extent X {x0:,.0f}..{x1:,.0f} Y {y0:,.0f}..{y1:,.0f}"
-        if w >= h:
-            Y = (y0 + y1) / 2
-            return {"kind": "h", "Y": Y, "src": src, "desc": f"{src}: {ext} -> horizontal line at Y = {Y:,.0f}"}
-        X = (x0 + x1) / 2
-        return {"kind": "v", "X": X, "src": src, "desc": f"{src}: {ext} -> vertical line at X = {X:,.0f}"}
+        n_ent = sum(dwg.layers[n]["count"] for n in names if n in dwg.layers) \
+            + sum(1 for i in dwg.inserts if i["layer"] in names)
+        if n_ent > 1:
+            warn(f"{flag}: layer '{pat}' holds {n_ent} entities; using the extent of ALL of them. "
+                 f"If only one object marks the line, select it by hatch pattern (hatch:PATTERN@LAYER)"
+                 f" or text (text:LABEL@LAYER).")
+        return _extent_ref(boxes, src, f"{n_ent} entities")
     if low.startswith("text:"):
         body = s[s.index(":") + 1:].strip()
         label, _, layer = body.partition("@")
@@ -2611,8 +2652,8 @@ def resolve_ref(dwg, spec, flag):
         return {"kind": "seg", "seg": tuple(vals), "src": "option",
                 "desc": f"line from ({vals[0]:,.0f}, {vals[1]:,.0f}) to ({vals[2]:,.0f}, {vals[3]:,.0f}) (typed)"}
     die(f"{flag} '{spec}' not understood. Give a line as  Y  (horizontal at that drawing Y),\n"
-        "  x=X  (vertical),  X0,Y0,X1,Y1,  layer:NAME  (the object on that layer, e.g. a\n"
-        "  pathway rectangle) or  text:LABEL@LAYER  (the position of a text, e.g. a bay ID).")
+        "  x=X  (vertical),  X0,Y0,X1,Y1,  hatch:PATTERN@LAYER  (a hatched pathway),\n"
+        "  layer:NAME  (everything on that layer) or  text:LABEL@LAYER  (a text, e.g. a bay ID).")
 
 
 def ref_line(ref):
@@ -4049,6 +4090,13 @@ def do_inspect(dwg: Drawing, sch: Schedule | None, full: bool = False):
         print("\nBlock attribute tags: none found")
         print("  (tools are probably identified by block name or by a text label)")
 
+    if dwg.hatches:
+        hp = Counter((h["pattern"], h["layer"]) for h in dwg.hatches)
+        print(f"\nHatch patterns ({len(dwg.hatches):,} hatches):")
+        for (pat, lay), n in hp.most_common(None if full else 15):
+            print(f"  {pat:<16} on {lay:<28} {n:>6,}")
+        print("  -> a hatched pathway can anchor the move-in order:  --aisle hatch:PATTERN@LAYER")
+
     if dwg.texts:
         show_n = len(dwg.texts) if full else 15
         print(f"\nText labels ({len(dwg.texts):,})" + ("" if full else ", first 15") + ":")
@@ -4207,11 +4255,13 @@ def build_parser():
                         "(that side first; north = higher Y), or a rectangle in drawing "
                         "units X0,Y0,X1,Y1 (placements inside it first), or a half of the fab "
                         "measured from a drawing object: north-of=text:XPH-D@BAY-ID, "
-                        "south-of=layer:NAME, north-of=Y. Use it when the schedule covers one "
+                        "south-of=hatch:ANSI31@LAYER, north-of=layer:NAME, north-of=Y. Use it "
+                        "when the schedule covers one "
                         "part of the fab and the same labels also exist elsewhere")
     g.add_argument("--aisle", metavar="WHERE",
-                   help="type mode: the passageway tools are brought in through -- layer:NAME "
-                        "(the pathway object on that layer), text:LABEL@LAYER (a text on it), "
+                   help="type mode: the passageway tools are brought in through -- "
+                        "hatch:PATTERN@LAYER (a hatched pathway, e.g. hatch:ANSI31@00_Dummy), "
+                        "layer:NAME (everything on that layer), text:LABEL@LAYER (a text on it), "
                         "or coordinates Y | x=X | X0,Y0,X1,Y1. Copies of a label farthest from "
                         "it are taken first, so the area north of the aisle fills north to "
                         "south and the area south of it south to north. With --prefer "

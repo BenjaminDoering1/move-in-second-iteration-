@@ -225,9 +225,14 @@ def make_aisle(d):
         doc.layers.add(n)
     msp.add_lwpolyline([(0, 0), (3000, 0), (3000, 2000), (0, 2000)], close=True, dxfattribs={"layer": "WALLS"})
     msp.add_line((0, 1000), (3000, 1000), dxfattribs={"layer": "WALLS"})
-    # the pathway object (a rectangle 940..1060) on its own layer, as in the real floor3
-    msp.add_lwpolyline([(100, 940), (2900, 940), (2900, 1060), (100, 1060)], close=True,
-                       dxfattribs={"layer": "00_Dummy"})
+    # the pathway (940..1060) is an ANSI31 hatch on layer 00_Dummy, which also
+    # holds other objects (a line far north and a solid hatch), as on the real floor3
+    h = msp.add_hatch(dxfattribs={"layer": "00_Dummy"})
+    h.set_pattern_fill("ANSI31", scale=20)
+    h.paths.add_polyline_path([(100, 940), (2900, 940), (2900, 1060), (100, 1060)], is_closed=True)
+    msp.add_line((100, 1900), (2900, 1900), dxfattribs={"layer": "00_Dummy"})
+    sol = msp.add_hatch(dxfattribs={"layer": "00_Dummy"})
+    sol.paths.add_polyline_path([(2700, 1700), (2800, 1700), (2800, 1800), (2700, 1800)], is_closed=True)
     # the bay ID text that marks the split between the upper and the lower fab
     msp.add_text("XPH-D", dxfattribs={"height": 20, "layer": "BAY-ID"}).set_placement((1500, 250))
     msp.add_text("XPH-D", dxfattribs={"height": 5, "layer": "NOTES"}).set_placement((2800, 1900))  # a smaller stray copy
@@ -611,22 +616,31 @@ def scenario_aisle(d):
           ys == [109, 409, 609, 809, 1209, 1409], str(ys))
 
     # --- drawing anchors: the pathway object on its layer and the bay-ID text
-    code, log = run(*base, "--aisle", "layer:00_Dummy", "--prefer", "north-of=text:XPH-D@BAY-ID",
+    code, log = run(*base, "--aisle", "hatch:ANSI31@00_Dummy", "--prefer", "north-of=text:XPH-D@BAY-ID",
                     "--trace", "DT_112", "-o", out)
     P = payload(out)
     ys = order(P)
     check("anchors: upper fab first (north-of the bay text), each area from its far end",
           ys == [1609, 409, 1409, 609, 1209, 809] or ys == [409, 1609, 609, 1409, 809, 1209], str(ys))
     check("anchors printed in the run header",
-          "Anchor      : --aisle layer:00_Dummy  =  layer '00_Dummy': 1 object(s), extent X 100..2,900 Y 940..1,060 -> horizontal line at Y = 1,000" in log
+          "Anchor      : --aisle hatch:ANSI31@00_Dummy  =  hatch 'ANSI31' on layer '00_Dummy': 1 hatch(es), extent X 100..2,900 Y 940..1,060 -> horizontal line at Y = 1,000" in log
           and "Anchor      : --prefer north-of=text:XPH-D@BAY-ID  =  text 'XPH-D' on layer 'BAY-ID' at (1,500, 250)" in log
           and "re-point these options" in log, log[-1500:])
-    check("order line names the anchors", "north of text 'XPH-D' on layer 'BAY-ID' first, then farthest from the passageway at Y = 1,000 (layer '00_Dummy')" in log, log[-1200:])
+    check("order line names the anchors", "north of text 'XPH-D' on layer 'BAY-ID' first, then farthest from the passageway at Y = 1,000 (hatch 'ANSI31' on layer '00_Dummy')" in log, log[-1200:])
     check("lower-fab copy marked OUT in the trace", "(1,015.0, 109.0) on 'TOOLS' OUT" in log, log[-1500:])
     check("reference lines in the payload for the viewer", len(P["refLines"]) == 2
           and all(r["seg"][1] == r["seg"][3] for r in P["refLines"])
           and any(r["seg"][1] == -1000 for r in P["refLines"]) and any(r["seg"][1] == -250 for r in P["refLines"]), str(P["refLines"]))
 
+    code, log = run(*base, "--aisle", "layer:00_Dummy", "-o", out)
+    check("whole-layer anchor warns about the other objects and uses the full extent",
+          "holds 3 entities; using the extent of ALL of them" in log and "Y 940..1,900 -> horizontal line at Y = 1,420" in log, log[-900:])
+    code, log = run(*base, "--aisle", "hatch:ANSI31@NOPE", "-o", out)
+    check("missing hatch stops the run with the patterns found", code != 0 and "no hatch with pattern 'ANSI31' on layer 'NOPE'" in log
+          and "That pattern exists on: ANSI31 on '00_Dummy' x1" in log, log[-600:])
+    code, log = run(*base, "--inspect")
+    check("--inspect lists hatch patterns per layer", "Hatch patterns" in log and "ANSI31" in log and "SOLID" in log
+          and "--aisle hatch:PATTERN@LAYER" in log, log[-1500:])
     code, log = run(*base, "--prefer", "north-of=text:XPH-D", "-o", out)
     check("ambiguous text warned, largest used", "appears 2 times" in log and "using the largest at (1,500, 250)" in log, log[-800:])
     code, log = run(*base, "--aisle", "layer:NOPE", "-o", out)

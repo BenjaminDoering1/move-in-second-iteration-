@@ -75,14 +75,16 @@ python fab_movein.py --dxf layout.dxf --schedule movein.xlsx --inspect   # see w
   directional `--prefer` combined with a matching aisle orientation means
   "that side of the aisle first"; a rectangle still means "inside first".
   **Drawing anchors** (v1.13, `resolve_ref`): `--aisle` and `--prefer
-  north-of=|south-of=|east-of=|west-of=` accept `layer:NAME` (extent of the
-  layer's geometry + inserts → horizontal centreline if wider than tall,
-  else vertical), `text:LABEL[@LAYER]` (largest matching top-level text,
+  north-of=|south-of=|east-of=|west-of=` accept `hatch:PATTERN[@LAYER]`
+  (extent of the matching HATCH entities, recorded in `Drawing.hatches`
+  during `_scan`; several → warn and union), `layer:NAME` (extent of the
+  layer's geometry + inserts, warned when it holds more than one entity →
+  horizontal centreline if wider than tall, else vertical), `text:LABEL[@LAYER]` (largest matching top-level text,
   then blocktext inserts; several → warn) or coordinates. Missing → `die`
   with candidates. `placement_policy(args, dwg)` returns `anchors`; `main`
   prints them (`Anchor :`), `build_payload` emits `refLines` (SVG segments
   across the bounds) drawn by the viewer's `#refG`. Project-specific
-  workarounds (floor3: pathway on `00_Dummy`, bay text `XPH-D` on `BAY-ID`)
+  workarounds (floor3: ANSI31 hatch on `00_Dummy`, bay text `XPH-D` on `BAY-ID`)
   live in HANDOVER.md "Drawing anchors", not in code.
 * **Size budget** (`--max-mb`, v1.4) — `shrink_to_budget` drops the
   heaviest background layers (never tools; `strong` walls last, layers under

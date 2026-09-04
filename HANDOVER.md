@@ -1,6 +1,6 @@
 # Fab Move-In Simulator: Handover
 
-Status as of 4 September 2026, script version 1.13.0.
+Status as of 4 September 2026, script version 1.13.1.
 
 ## What it is
 
@@ -15,7 +15,7 @@ double-clicking and works offline. There is no server, no upload, no account.
 | Item | Location |
 |---|---|
 | Source | GitHub repository `BenjaminDoering1/Fab-move-in-simulator-` (private), branch `main` |
-| Current version | 1.13.0 (4 Sep 2026), on branch `claude/move-in-conflicts-storage-v9dvth` until merged into `main`. |
+| Current version | 1.13.1 (4 Sep 2026), on branch `claude/move-in-conflicts-storage-v9dvth` until merged into `main`. |
 | The tool | `fab_movein.py`, the only file a user needs |
 | Developer notes | `CLAUDE.md` (architecture, performance invariants) |
 | Regression tests | `tests/run_tests.py` |
@@ -78,7 +78,7 @@ south of it south to north. Both boundaries are read from the drawing (see
 "Drawing anchors" below):
 
 ```
-python fab_movein.py --dxf data\floor3.dxf --schedule data\move_in_plan.xlsx --type-col Block_ID --tool-layer "0_ENG 3K tool" --prefer "north-of=text:XPH-D@BAY-ID" --aisle layer:00_Dummy -o floor3_simulation.html
+python fab_movein.py --dxf data\floor3.dxf --schedule data\move_in_plan.xlsx --type-col Block_ID --tool-layer "0_ENG 3K tool" --prefer "north-of=text:XPH-D@BAY-ID" --aisle hatch:ANSI31@00_Dummy -o floor3_simulation.html
 ```
 
 ## Drawing anchors (floor 3) -- READ THIS WHEN THE DXF CHANGES
@@ -89,16 +89,18 @@ script reads them fresh on every run rather than storing coordinates:
 
 | What it marks | Where it is in the drawing | Option | If the DXF changes |
 |---|---|---|---|
-| The move-in passageway between the north and the south area of the ENG line | The pathway object on layer `00_Dummy` (its extent gives a horizontal centreline) | `--aisle layer:00_Dummy` | Put the new pathway object's layer after `layer:`; or type the Y (`--aisle 18500`); or name a text on it (`--aisle text:LABEL@LAYER`) |
+| The move-in passageway between the north and the south area of the ENG line | The pathway object on layer `00_Dummy`: the hatch with pattern `ANSI31` (the layer holds other objects too, so the whole layer must not be used). Its extent gives a horizontal centreline | `--aisle hatch:ANSI31@00_Dummy` | Point at the new pathway: another pattern or layer (`hatch:PATTERN@LAYER`, `--inspect` lists the hatch patterns per layer), a text on it (`text:LABEL@LAYER`), a layer holding only the pathway (`layer:NAME`), or the typed Y (`--aisle 18500`) |
 | The split between the upper fab (ENG line) and the lower fab | The Y of the text `XPH-D` on layer `BAY-ID` | `--prefer "north-of=text:XPH-D@BAY-ID"` | Name another text (`north-of=text:XPH-E@BAY-ID`), a layer (`north-of=layer:NAME`) or a Y (`north-of=17800`) |
 
 How to see that they still hold:
 
 - The run prints each anchor it resolved, with the object it found and the
   line it derived, for example
-  `Anchor : --aisle layer:00_Dummy = layer '00_Dummy': 1 object(s), extent X ... -> horizontal line at Y = 18,412`.
-  If the extent or the Y looks wrong (a second object on the layer, the text
-  moved), fix the option.
+  `Anchor : --aisle hatch:ANSI31@00_Dummy = hatch 'ANSI31' on layer '00_Dummy': 1 hatch(es), extent X ... -> horizontal line at Y = 18,412`.
+  If the extent or the Y looks wrong (a second hatch with the same pattern,
+  the text moved), fix the option. More than one matching hatch is warned
+  about with each piece's extent; a whole layer with several objects is
+  warned about too.
 - A missing layer or text stops the run and lists similar layer names or the
   texts on that layer. `--inspect` lists all layers, `--inspect-full` all
   texts.
@@ -157,8 +159,9 @@ This is the knowledge that is easiest to lose.
   north` alone sorts all copies north to south, which is wrong for the
   southern area.
 - **Drawing anchors** (1.13): `--aisle` and `--prefer north-of=` (also
-  `south-of=`, `east-of=`, `west-of=`) accept `layer:NAME` (the object on
-  that layer), `text:LABEL@LAYER` (a text's position) or plain coordinates
+  `south-of=`, `east-of=`, `west-of=`) accept `hatch:PATTERN@LAYER` (a
+  hatched pathway), `layer:NAME` (everything on that layer),
+  `text:LABEL@LAYER` (a text's position) or plain coordinates
   (`Y`, `x=X`, `X0,Y0,X1,Y1`). The run prints every resolved anchor, the
   viewer draws them, `--trace` measures against them.
 - The matching option `blocktext` is chosen automatically; `--match blocktext`
@@ -321,7 +324,7 @@ layer built from full equipment drawings shrank 33 times with block detail
 | `--loose` | Ignore punctuation and spacing when matching |
 | `--tool-layer NAME` | Type mode: copies of a label on this layer are taken first (repeatable, wildcards) |
 | `--prefer WHERE` | Type mode: `north`/`south`/`east`/`west` side first, `X0,Y0,X1,Y1` rectangle first, or `north-of=REF` (also south/east/west) with REF a `layer:`, `text:` or coordinate |
-| `--aisle WHERE` | Type mode: the move-in passageway (`layer:NAME`, `text:LABEL@LAYER`, `Y`, `x=X` or `X0,Y0,X1,Y1`); copies farthest from it are taken first, each side filling towards the aisle |
+| `--aisle WHERE` | Type mode: the move-in passageway (`hatch:PATTERN@LAYER`, `layer:NAME`, `text:LABEL@LAYER`, `Y`, `x=X` or `X0,Y0,X1,Y1`); copies farthest from it are taken first, each side filling towards the aisle |
 | `-o`, `--title`, `--start-date`, `--end-date`, `--open` | Output file, page title, timeline clipping, open in browser |
 | `--exclude-layer`, `--only-layer` | Drop or keep drawing layers; wildcards, repeatable |
 | `--block-detail auto/full/outline/box` | How much of each block's inner geometry to keep (default auto) |
@@ -347,6 +350,7 @@ layer built from full equipment drawings shrank 33 times with block detail
 | 1.8.0, 1.8.1 | 2 Sep 2026 | `--block-detail` footprint reduction; `--layers` shows placements per layer |
 | 1.9.0 | 2 Sep 2026 | Consolidation (split functions, memoised indexes, Windows console guard) and the in-repo regression suite |
 | 1.10.0 | 3 Sep 2026 | `--tool-layer` and `--prefer`: choose which copy of a repeated label a row takes (layer, side of the fab, rectangle); `--trace` shows the order and layer, `--inspect` shows the insert extents |
+| 1.13.1 | 4 Sep 2026 | `hatch:PATTERN@LAYER` anchor for the ANSI31 pathway on `00_Dummy` (the layer holds other objects); `--inspect` lists hatch patterns |
 | 1.13.0 | 4 Sep 2026 | Drawing anchors: `--aisle layer:00_Dummy`, `--prefer north-of=text:XPH-D@BAY-ID`; anchors printed per run, drawn in the viewer, missing ones stop the run |
 | 1.12.0 | 4 Sep 2026 | `--aisle`: copies of a label fill from the far end of each area towards the move-in passageway (north area north to south, south area south to north) |
 | 1.11.0 | 4 Sep 2026 | Move-in conflicts detected and marked (overlap, boxed in, crowding, daily capacity, no storage); storage zones and slot assignment for delivered tools; filters by model / vendor / module / any column, colour by module |
