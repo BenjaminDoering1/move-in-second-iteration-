@@ -81,16 +81,25 @@ south of it south to north. Both boundaries are read from the drawing (see
 python fab_movein.py --dxf data\floor3.dxf --schedule data\move_in_plan.xlsx --type-col Block_ID --tool-layer "0_ENG 3K tool" --prefer "north-of=text:XPH-D@BAY-ID" --aisle hatch:ANSI31@00_Dummy -o floor3_simulation.html
 ```
 
-## Drawing anchors (floor 3) -- READ THIS WHEN THE DXF CHANGES
+Floor 1: the upper fab ends in the south at the text `XIM-C`, and no
+passageway rule has been given yet, so:
 
-The placement order depends on two objects in `floor3.dxf`. They are
+```
+python fab_movein.py --dxf data\floor1.dxf --schedule data\move_in_plan.xlsx --type-col Block_ID --prefer "north-of=text:XIM-C" -o floor1_simulation.html
+```
+
+## Drawing anchors -- READ THIS WHEN A DXF CHANGES
+
+The placement order depends on a few objects in the drawings. They are
 deliberate, simple workarounds, not features of the DXF format, and the
 script reads them fresh on every run rather than storing coordinates:
 
-| What it marks | Where it is in the drawing | Option | If the DXF changes |
-|---|---|---|---|
-| The move-in passageway between the north and the south area of the ENG line | The pathway object on layer `00_Dummy`: the hatch with pattern `ANSI31` (the layer holds other objects too, so the whole layer must not be used). Its extent gives a horizontal centreline | `--aisle hatch:ANSI31@00_Dummy` | Point at the new pathway: another pattern or layer (`hatch:PATTERN@LAYER`, `--inspect` lists the hatch patterns per layer), a text on it (`text:LABEL@LAYER`), a layer holding only the pathway (`layer:NAME`), or the typed Y (`--aisle 18500`) |
-| The split between the upper fab (ENG line) and the lower fab | The Y of the text `XPH-D` on layer `BAY-ID` | `--prefer "north-of=text:XPH-D@BAY-ID"` | Name another text (`north-of=text:XPH-E@BAY-ID`), a layer (`north-of=layer:NAME`) or a Y (`north-of=17800`) |
+| Drawing | What it marks | Where it is in the drawing | Option | If the DXF changes |
+|---|---|---|---|---|
+| floor3 | The move-in passageway between the north and the south area of the ENG line | The pathway object on layer `00_Dummy`: the hatch with pattern `ANSI31` (the layer holds other objects too, so the whole layer must not be used). Its extent gives a horizontal centreline | `--aisle hatch:ANSI31@00_Dummy` | Point at the new pathway: another pattern or layer (`hatch:PATTERN@LAYER`, `--inspect` lists the hatch patterns per layer), a text on it (`text:LABEL@LAYER`), a layer holding only the pathway (`layer:NAME`), or the typed Y (`--aisle 18500`) |
+| floor3 | The split between the upper fab (ENG line) and the lower fab | The Y of the text `XPH-D` on layer `BAY-ID` | `--prefer "north-of=text:XPH-D@BAY-ID"` | Name another text (`north-of=text:XPH-E@BAY-ID`), a layer (`north-of=layer:NAME`) or a Y (`north-of=17800`) |
+| floor1 | The southernmost point of the upper fab | The Y of the text `XIM-C` (layer not recorded; add `@LAYER` if the run warns that the text appears more than once) | `--prefer "north-of=text:XIM-C"` | Name another text, a layer or a Y, as above |
+| floor1 | The move-in passageway | not defined yet | add `--aisle hatch:PATTERN@LAYER` (or `layer:` / `text:` / `Y`) once the pathway object is known | |
 
 How to see that they still hold:
 
