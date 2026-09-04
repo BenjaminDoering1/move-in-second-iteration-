@@ -67,7 +67,7 @@ import re
 import sys
 from collections import Counter, defaultdict
 
-__version__ = "1.11.0"
+__version__ = "1.12.0"
 
 _VIEWER_TEMPLATE = r'''<!DOCTYPE html>
 <html lang="en">
@@ -2507,7 +2507,7 @@ def parse_prefer(spec):
     s = PREFER_ALIASES.get(str(spec).strip().lower(), str(spec).strip().lower())
     if s in PREFER_DIRS:
         key, desc = PREFER_DIRS[s]
-        return {"key": key, "inside": None, "desc": desc}
+        return {"key": key, "inside": None, "desc": desc, "dir": s}
     try:
         vals = [float(v) for v in re.split(r"[,;\s]+", s) if v]
     except ValueError:
@@ -2523,20 +2523,82 @@ def parse_prefer(spec):
             "desc": f"inside ({x0:,.0f}, {y0:,.0f})-({x1:,.0f}, {y1:,.0f}) first"}
 
 
+def parse_aisle(spec):
+    """--aisle: the passageway tools are brought in through. Y (horizontal
+    at that drawing Y), x=X (vertical) or X0,Y0,X1,Y1 (any line). Returns
+    None or {"dist": distance of (x, y) from the line, "side": +1 / -1 for
+    the north-or-east / south-or-west side, "horizontal", "desc"}."""
+    if spec is None or not str(spec).strip():
+        return None
+    s = str(spec).strip().lower().replace(" ", "")
+    try:
+        if s.startswith(("x=", "x:")):
+            X = float(s[2:])
+            return {"dist": lambda x, y: abs(x - X), "side": lambda x, y: (x > X) - (x < X),
+                    "horizontal": False, "desc": f"the passageway at X = {X:,.0f}"}
+        if s.startswith(("y=", "y:")):
+            s = s[2:]
+        vals = [float(v) for v in re.split(r"[,;]+", s) if v]
+    except ValueError:
+        vals = []
+    if len(vals) == 1:
+        Y = vals[0]
+        return {"dist": lambda x, y: abs(y - Y), "side": lambda x, y: (y > Y) - (y < Y),
+                "horizontal": True, "desc": f"the passageway at Y = {Y:,.0f}"}
+    if len(vals) == 4:
+        x0, y0, x1, y1 = vals
+        L = math.hypot(x1 - x0, y1 - y0)
+        if L > 0:
+            cross = lambda x, y: ((x1 - x0) * (y - y0) - (y1 - y0) * (x - x0)) / L
+            # left of the segment's direction is north for a west->east segment,
+            # east for a north->south one: normalise so +1 means north / east
+            flip = -1 if (x1 < x0 or (x1 == x0 and y1 < y0)) else 1
+            if abs(y1 - y0) > abs(x1 - x0):          # mostly vertical: +1 = east
+                flip = -flip
+            return {"dist": lambda x, y: abs(cross(x, y)),
+                    "side": lambda x, y: (1 if cross(x, y) * flip > 0 else -1 if cross(x, y) * flip < 0 else 0),
+                    "horizontal": abs(y1 - y0) <= abs(x1 - x0),
+                    "desc": f"the passageway from ({x0:,.0f}, {y0:,.0f}) to ({x1:,.0f}, {y1:,.0f})"}
+    die(f"--aisle '{spec}' not understood. Give the passageway as  --aisle Y  (horizontal, at\n"
+        "  that drawing Y),  --aisle x=X  (vertical), or  --aisle X0,Y0,X1,Y1  (a line).")
+
+
 def placement_policy(args):
     """How a row picks among several placements of its label (type mode):
-    --tool-layer placements first, then the --prefer order, then west to
-    east / south to north. None when neither option is given."""
+    --tool-layer placements first, then the --prefer order, then -- with
+    --aisle -- the copy farthest from the passageway (each side fills from
+    its far end towards the aisle), then west to east / south to north.
+    None when no option is given."""
     prefer = parse_prefer(getattr(args, "prefer", None))
+    aisle = parse_aisle(getattr(args, "aisle", None))
     layers = [l for l in (getattr(args, "tool_layer", None) or []) if str(l).strip()]
-    if not prefer and not layers:
+    if not prefer and not layers and not aisle:
         return None
     on_layer = (lambda h: layer_wanted(h["layer"], layers, [])) if layers else None
     pos = prefer["key"] if prefer else (lambda x, y: (x, y))
+    # a directional --prefer combined with --aisle means "that side of the
+    # passageway first" (north / south for a horizontal aisle, east / west
+    # for a vertical one); a rectangle still means "inside first"
+    side_want = None
+    if aisle and prefer and prefer.get("dir"):
+        d = prefer["dir"]
+        if aisle["horizontal"] and d in ("north", "south"):
+            side_want = 1 if d == "north" else -1
+        elif not aisle["horizontal"] and d in ("east", "west"):
+            side_want = 1 if d == "east" else -1
 
     def key(h):
         x, y = hit_centre(h)
-        return ((0 if on_layer(h) else 1) if on_layer else 0,) + tuple(pos(x, y))
+        k = ((0 if on_layer(h) else 1) if on_layer else 0,)
+        if not aisle:
+            return k + tuple(pos(x, y))
+        if prefer and prefer["inside"]:
+            k += (0 if prefer["inside"](x, y) else 1,)
+        elif side_want is not None:
+            k += (0 if aisle["side"](x, y) == side_want else 1,)
+        elif prefer:
+            k += tuple(pos(x, y))
+        return k + (-aisle["dist"](x, y), x, y)
 
     def misses(h):
         """Why this placement is not where the options say the tools are."""
@@ -2551,7 +2613,13 @@ def placement_policy(args):
     if layers:
         parts.append("on layer " + " / ".join(f"'{l}'" for l in layers) + " first")
     if prefer:
-        parts.append(prefer["desc"])
+        if side_want is not None:
+            parts.append(f"the {prefer['dir']} side of {aisle['desc']} first")
+        else:
+            parts.append(prefer["desc"])
+    if aisle:
+        parts.append(f"farthest from {aisle['desc']} first (each side fills from its far end "
+                     f"towards the passageway)")
     return {"key": key, "misses": misses, "desc": ", then ".join(parts),
             "restricts": bool(layers or (prefer and prefer["inside"]))}
 
@@ -2640,7 +2708,7 @@ def trace_label(dwg: Drawing, rows, strategy, label, assign_log, by_type, policy
     if by_type and policy:
         print(f"order    : {policy['desc']}")
     elif by_type and len(index.get(key, [])) > 1:
-        print("order    : west to east, then south to north  (change with --tool-layer NAME"
+        print("order    : west to east, then south to north  (change with --tool-layer NAME, --aisle Y"
               " and/or --prefer north|south|east|west|X0,Y0,X1,Y1)")
     got = [(r, h) for r, h in assign_log if rkey(r) == key]
     for r, h in got:
@@ -3795,6 +3863,7 @@ def do_inspect(dwg: Drawing, sch: Schedule | None, full: bool = False):
               f"  (mid X {(x0 + x1) / 2:,.0f}, mid Y {(y0 + y1) / 2:,.0f})")
         print("  -> with --type-col, choose which copy of a repeated label a row takes:")
         print("     --tool-layer NAME   --prefer north|south|east|west   --prefer X0,Y0,X1,Y1")
+        print("     --aisle Y  (move-in passageway: each side fills from its far end towards it)")
     for name, n in blocks.most_common(None if full else 30):
         print(f"  {name:<28} {n:>7,} inserts")
 
@@ -3974,6 +4043,13 @@ def build_parser():
                         "units X0,Y0,X1,Y1 (placements inside it first). Use it when the "
                         "schedule covers one part of the fab and the same labels also "
                         "exist elsewhere")
+    g.add_argument("--aisle", metavar="WHERE",
+                   help="type mode: the passageway tools are brought in through -- Y (a "
+                        "horizontal aisle at that drawing Y), x=X (vertical) or X0,Y0,X1,Y1 "
+                        "(any line). Copies of a label farthest from it are taken first, so "
+                        "the area north of the aisle fills north to south and the area south "
+                        "of it south to north. With --prefer north|south|east|west that side "
+                        "of the aisle is filled first")
 
     g = ap.add_argument_group("move-in conflicts (detected and marked by default)")
     g.add_argument("--conflict-window", type=int, default=3, metavar="DAYS",
@@ -4333,8 +4409,8 @@ def main(argv=None):
                 warn(f"--tool-layer '{lay}' matches no block insert in the drawing "
                      f"(layer names are listed by --inspect)")
     elif policy:
-        warn("--tool-layer / --prefer only matter with --type-col: without it every placement "
-             "carrying a scheduled ID is drawn, so there is nothing to choose between.")
+        warn("--tool-layer / --prefer / --aisle only matter with --type-col: without it every "
+             "placement carrying a scheduled ID is drawn, so there is nothing to choose between.")
 
     payload, n_ids, unmatched, label = build_payload(dwg, rows, strategy, args)
 

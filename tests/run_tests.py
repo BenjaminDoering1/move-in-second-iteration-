@@ -6,7 +6,7 @@ Regression suite for fab_movein.py.
     pip install playwright                # optional: browser checks (needs Chromium)
     python tests/run_tests.py             # everything
     python tests/run_tests.py --no-browser
-    python tests/run_tests.py --only=small,heavy     # scenarios: small blocktext prefer heavy xref conflicts
+    python tests/run_tests.py --only=small,heavy     # scenarios: small blocktext prefer aisle heavy xref conflicts
 
 Synthetic DXF/XLSX fixtures are generated into a temporary folder; every
 scenario runs the real command line and asserts on its output, and -- when
@@ -210,6 +210,28 @@ def make_prefer(d):
     doc.saveas(os.path.join(d, "pf.dxf"))
     xlsx(os.path.join(d, "pf.xlsx"), ["Block_ID", "Move In Date"],
          [("DT_112", dt.date(2026, 6, 1)), ("PMP_7", dt.date(2026, 6, 2))])
+
+
+def make_aisle(d):
+    """The ENG line: two areas above and below a move-in passageway at
+    Y = 1000. Six copies of one label, three per side, plus a copy of a
+    second label in each area; the schedule has one row per day."""
+    import ezdxf
+    doc = ezdxf.new("R2013")
+    msp = doc.modelspace()
+    for n in ("WALLS", "TOOLS"):
+        doc.layers.add(n)
+    msp.add_lwpolyline([(0, 0), (3000, 0), (3000, 2000), (0, 2000)], close=True, dxfattribs={"layer": "WALLS"})
+    msp.add_line((0, 1000), (3000, 1000), dxfattribs={"layer": "WALLS"})
+    b = doc.blocks.new("A$CAISLE001")
+    b.add_lwpolyline([(0, 0), (30, 0), (30, 18), (0, 18)], close=True)
+    b.add_text("DT_112", dxfattribs={"height": 4}).set_placement((15, 9))
+    for y in (1200, 1400, 1600, 800, 600, 400):      # north area rows, then south area rows
+        msp.add_blockref("A$CAISLE001", (1000, y), dxfattribs={"layer": "TOOLS"})
+    doc.saveas(os.path.join(d, "ai.dxf"))
+    start = dt.date(2026, 8, 3)
+    xlsx(os.path.join(d, "ai.xlsx"), ["Block_ID", "Move In Date"],
+         [("DT_112", start + dt.timedelta(days=i)) for i in range(6)])
 
 
 def make_heavy(d):
@@ -541,6 +563,50 @@ def scenario_prefer(d):
     check("--inspect shows where inserts are", "most inserts lie in X" in log and "--prefer" in log)
 
 
+def scenario_aisle(d):
+    print("\n[aisle] two areas either side of a passageway fill from their far ends towards it")
+    out = os.path.join(d, "ai.html")
+    base = ("--dxf", f"{d}/ai.dxf", "--schedule", f"{d}/ai.xlsx", "--type-col", "Block_ID")
+
+    def order(P):
+        """Drawing Y of each copy in move-in order (SVG y -> drawing y, centre)."""
+        return [round(-(t["y"] + t["h"] / 2)) for t in sorted(P["tools"], key=lambda t: t["day"])]
+
+    code, log = run(*base, "--trace", "DT_112", "-o", out)
+    ys = order(payload(out))
+    check("default order ignores the passageway", ys == [409, 609, 809, 1209, 1409, 1609], str(ys))
+
+    code, log = run(*base, "--aisle", "1000", "--trace", "DT_112", "-o", out)
+    ys = order(payload(out))
+    north = [y for y in ys if y > 1000]; south = [y for y in ys if y < 1000]
+    check("--aisle: north area fills north to south", north == sorted(north, reverse=True), str(ys))
+    check("--aisle: south area fills south to north", south == sorted(south), str(ys))
+    check("--aisle: farthest copies first overall", ys[:2] == [409, 1609] or ys[:2] == [1609, 409], str(ys))
+    check("--aisle reported", "Placements  : farthest from the passageway at Y = 1,000 first" in log
+          and "order    : farthest from" in log, log[-900:])
+
+    code, log = run(*base, "--aisle", "y=1000", "--prefer", "north", "-o", out)
+    ys = order(payload(out))
+    check("--prefer north + --aisle: north side first, north to south, then south to north",
+          ys == [1609, 1409, 1209, 409, 609, 809], str(ys))
+    check("combined order reported", "the north side of the passageway at Y = 1,000 first, then farthest" in log, log[-700:])
+
+    code, log = run(*base, "--aisle", "0,1000,3000,1000", "--prefer", "0,1000,3000,2000", "-o", out)
+    ys = order(payload(out))
+    check("--prefer rectangle + --aisle line: inside first, far end first",
+          ys == [1609, 1409, 1209, 409, 609, 809], str(ys))
+
+    code, log = run(*base, "--aisle", "x=1000", "-o", out)
+    ys = order(payload(out))
+    check("vertical aisle: all copies at X=1015 tie, default order breaks the tie",
+          ys == [409, 609, 809, 1209, 1409, 1609], str(ys))
+
+    code, log = run(*base, "--aisle", "north", "-o", out)
+    check("bad --aisle rejected", code != 0 and "not understood" in log)
+    code, log = run("--dxf", f"{d}/ai.dxf", "--schedule", f"{d}/ai.xlsx", "--aisle", "1000", "--match", "blocktext", "-o", out)
+    check("--aisle without --type-col warns", "only matter with --type-col" in log)
+
+
 def scenario_heavy(d):
     print("\n[heavy] --max-mb budget, symbol remap, tiles, bitmap zoom, playback")
     out = os.path.join(d, "heavy.html")
@@ -719,6 +785,9 @@ def main():
         if want("prefer"):
             make_prefer(d)
             scenario_prefer(d)
+        if want("aisle"):
+            make_aisle(d)
+            scenario_aisle(d)
         if want("heavy"):
             make_heavy(d)
             scenario_heavy(d)

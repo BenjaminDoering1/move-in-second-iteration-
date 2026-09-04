@@ -68,6 +68,12 @@ python fab_movein.py --dxf layout.dxf --schedule movein.xlsx --inspect   # see w
   order and marks each placement `in`/`OUT` with its layer; `--inspect`
   prints where the block inserts are (`insert_extents`). Both options warn
   and do nothing in ID mode, where every copy carrying an ID is drawn anyway.
+  **`--aisle`** (v1.12, `parse_aisle`): the move-in passageway as `Y`,
+  `x=X` or a line `X0,Y0,X1,Y1`; the sort key becomes (layer, prefer group,
+  -distance from the aisle, x, y) so each side fills from its far end
+  towards the aisle (north area north→south, south area south→north). A
+  directional `--prefer` combined with a matching aisle orientation means
+  "that side of the aisle first"; a rectangle still means "inside first".
 * **Size budget** (`--max-mb`, v1.4) — `shrink_to_budget` drops the
   heaviest background layers (never tools; `strong` walls last, layers under
   10 KB skipped) until the payload fits, then prunes/remaps unreferenced
@@ -204,7 +210,8 @@ the real CLI: attributed tool blocks (rotated / scaled / mirrored) checked
 against ezdxf-exploded ground-truth bboxes, proxy blocks without geometry,
 a stray entity far away, labels inside anonymous twin blocks, a split label
 (`--trace`), loose matching, type mode, a label placed in both halves of the
-fab (`--tool-layer` / `--prefer`), `--max-mb` with symbol remap, tiles /
+fab (`--tool-layer` / `--prefer`), two areas either side of a move-in
+passageway (`--aisle`), `--max-mb` with symbol remap, tiles /
 fine-detail / bitmap zoom, PNG export, playback cost, an inlined whole-floor
 block, footprint reduction, every conflict kind plus storage slots
 (`conflicts` scenario), and the facet filters. Run it before every push; extend it with a
