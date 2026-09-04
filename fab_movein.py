@@ -67,7 +67,7 @@ import re
 import sys
 from collections import Counter, defaultdict
 
-__version__ = "1.12.0"
+__version__ = "1.13.0"
 
 _VIEWER_TEMPLATE = r'''<!DOCTYPE html>
 <html lang="en">
@@ -215,6 +215,9 @@ body.hide-cf #cfG{display:none}
 #storeG g.stored text{fill:var(--ink-2);font-family:system-ui,sans-serif;pointer-events:none}
 #storeG g.stored.flash use{animation:cfpulse .5s ease-in-out 4}
 body.hide-zones #zoneG,body.hide-zones #storeG{display:none}
+#refG line{stroke:var(--s2);stroke-width:1.5;stroke-dasharray:10 5;vector-effect:non-scaling-stroke;opacity:.8}
+#refG text{fill:var(--s2);font-family:system-ui,sans-serif;font-weight:600;pointer-events:none;opacity:.9}
+body.hide-refs #refG{display:none}
 .warnpill.cf-pill{color:var(--s8);border-color:color-mix(in srgb,var(--s8) 40%,transparent);cursor:pointer}
 .tl-row .kind{font-size:10px;text-transform:uppercase;letter-spacing:.04em;padding:1px 6px;border-radius:4px;
   color:#fff;background:var(--s8);flex:none}
@@ -355,6 +358,7 @@ details.menu .pop{position:absolute;right:0;top:calc(100% + 6px);z-index:40;back
         <label class="ck"><input type="checkbox" id="ckFast"> Fast rendering (no anti-aliasing)</label>
         <label class="ck" id="lblCf" style="display:none"><input type="checkbox" id="ckCf" checked> Conflict markers</label>
         <label class="ck" id="lblZones" style="display:none"><input type="checkbox" id="ckZones" checked> Storage zones and waiting tools</label>
+        <label class="ck" id="lblRefs" style="display:none"><input type="checkbox" id="ckRefs" checked> Placement reference lines (aisle, fab split)</label>
         <h4>Drawing layers</h4>
         <div id="layerList"></div>
         <div id="unmatchedBox" style="display:none">
@@ -599,6 +603,8 @@ function makeMapSkeleton(){
   D.syms.forEach((d, i) => defs.appendChild(svgEl('path', { id: 'sym' + i, d, 'vector-effect': 'non-scaling-stroke' })));
   svg.appendChild(defs);
   const root = svgEl('g');
+  MAP.refG = svgEl('g', { id: 'refG' });
+  root.appendChild(MAP.refG);
   MAP.zoneG = svgEl('g', { id: 'zoneG' });
   root.appendChild(MAP.zoneG);
   MAP.ghostG = svgEl('g', { id: 'ghostG' });
@@ -748,6 +754,13 @@ function buildToolsChunked(done){
 
 /* storage zones, tools waiting in their slots, conflict markers */
 function buildExtras(){
+  (D.refLines || []).forEach(r => {
+    const [x0, y0, x1, y1] = r.seg;
+    MAP.refG.appendChild(svgEl('line', { x1: x0, y1: y0, x2: x1, y2: y1 }));
+    const fs = Math.max(MED * .9, .001);
+    const te = svgEl('text', { x: Math.min(x0, x1) + fs, y: (y0 + y1) / 2 - fs * .4, 'font-size': fs });
+    te.textContent = r.n; MAP.refG.appendChild(te);
+  });
   if (ST) {
     ST.zones.forEach((z, zi) => {
       MAP.zoneG.appendChild(svgEl('rect', { 'class': 'zone', x: z.x, y: z.y, width: z.w, height: z.h, 'data-z': zi }));
@@ -1093,6 +1106,10 @@ function buildMenu(){
     $('lblZones').style.display = ''; $('tabSt').style.display = '';
     $('ckZones').onchange = () => document.body.classList.toggle('hide-zones', !$('ckZones').checked);
     ST.zones.forEach((z, i) => z.i = i);
+  }
+  if ((D.refLines || []).length) {
+    $('lblRefs').style.display = '';
+    $('ckRefs').onchange = () => document.body.classList.toggle('hide-refs', !$('ckRefs').checked);
   }
   if (CF.length || ST) document.body.classList.add('wide');
   const lm = $('labelMode');
@@ -2497,80 +2514,210 @@ PREFER_ALIASES = {"n": "north", "top": "north", "upper": "north", "up": "north",
                   "w": "west", "left": "west", "e": "east", "right": "east"}
 
 
-def parse_prefer(spec):
+# --------------------------------------------------------------------------
+# DRAWING ANCHORS -- lines the placement order is measured against.
+#
+# --aisle and --prefer north-of= / south-of= / east-of= / west-of= accept a
+# reference that is READ FROM THE DRAWING on every run, so the numbers are
+# never typed into a command:
+#
+#   layer:NAME          the object(s) on that layer (a pathway rectangle, a
+#                       centreline): the centre of their extent, horizontal
+#                       when wider than tall, else vertical
+#   text:STRING[@LAYER] the position of that text label (a bay ID such as
+#                       "XPH-D" on layer "BAY-ID"): a horizontal line at its Y
+#   Y | x=X | X0,Y0,X1,Y1   plain drawing coordinates, as before
+#
+# These are deliberate, simple workarounds that tie the script to how one
+# particular drawing is organised. The run prints every anchor it resolved
+# ("Anchor : ...") and the viewer draws them as dashed reference lines, so
+# when the DXF changes it is obvious what to re-point: pick another layer or
+# text with --inspect (layers, text labels) and change the option, nothing
+# else. A missing layer or text stops the run with the candidates listed.
+# --------------------------------------------------------------------------
+
+def resolve_ref(dwg, spec, flag):
+    """A reference line for --aisle / --prefer. Returns {"kind": "h" (Y),
+    "v" (X) or "seg" (X0,Y0,X1,Y1), "Y"/"X"/"seg", "desc", "src"} or dies
+    with the drawing's candidates listed."""
+    s = str(spec).strip()
+    low = s.lower().replace(" ", "")
+    if low.startswith("layer:"):
+        pat = s[s.index(":") + 1:].strip()
+        names = [n for n in dwg.layers if layer_wanted(n, [pat], [])]
+        names += [i["layer"] for i in dwg.inserts if i["layer"] not in names and layer_wanted(i["layer"], [pat], [])]
+        names = sorted(set(names))
+        boxes = []
+        for n in names:
+            b = dwg.layers[n]["geom"].bbox() if n in dwg.layers else None
+            if b:
+                boxes.append(b)
+            boxes += [tuple(i["bbox"]) for i in dwg.inserts if i["layer"] == n and i["bbox"]]
+        if not boxes:
+            close = [n for n in dwg.layers if compact(pat.strip("*")) and compact(pat.strip("*")) in compact(n)][:8]
+            die(f"{flag} '{spec}': no layer '{pat}' with geometry in the drawing."
+                + (f"\n  Similar layer names: {', '.join(close)}" if close else "")
+                + "\n  --inspect lists all layers.")
+        x0 = min(b[0] for b in boxes); y0 = min(b[1] for b in boxes)
+        x1 = max(b[2] for b in boxes); y1 = max(b[3] for b in boxes)
+        w, h = x1 - x0, y1 - y0
+        src = f"layer '{names[0]}'" + (f" (+{len(names) - 1} more)" if len(names) > 1 else "")
+        ext = f"{len(boxes)} object(s), extent X {x0:,.0f}..{x1:,.0f} Y {y0:,.0f}..{y1:,.0f}"
+        if w >= h:
+            Y = (y0 + y1) / 2
+            return {"kind": "h", "Y": Y, "src": src, "desc": f"{src}: {ext} -> horizontal line at Y = {Y:,.0f}"}
+        X = (x0 + x1) / 2
+        return {"kind": "v", "X": X, "src": src, "desc": f"{src}: {ext} -> vertical line at X = {X:,.0f}"}
+    if low.startswith("text:"):
+        body = s[s.index(":") + 1:].strip()
+        label, _, layer = body.partition("@")
+        label, layer = label.strip(), layer.strip()
+        hits = [t for t in dwg.texts if mkey(t["str"]) == mkey(label)
+                and (not layer or layer_wanted(t["layer"], [layer], []))]
+        if not hits:
+            for ins in dwg.index_by_blocktext().get(mkey(label), []):
+                if not layer or layer_wanted(ins["layer"], [layer], []):
+                    cx, cy = hit_centre(ins)
+                    hits.append({"str": label, "x": cx, "y": cy, "h": 0.0, "layer": ins["layer"]})
+        if not hits:
+            near = sorted({t["str"] for t in dwg.texts if compact(label) and compact(label) in compact(t["str"])})[:8]
+            on_layer = [t["str"] for t in dwg.texts if layer and layer_wanted(t["layer"], [layer], [])][:8]
+            die(f"{flag} '{spec}': no text '{label}'" + (f" on layer '{layer}'" if layer else "")
+                + " in the drawing."
+                + (f"\n  Texts containing it: {', '.join(near)}" if near else "")
+                + (f"\n  Texts on that layer: {', '.join(on_layer)}" if on_layer else "")
+                + "\n  --inspect-full lists all text labels; add @LAYER to narrow the search.")
+        hits.sort(key=lambda t: -t["h"])
+        t = hits[0]
+        src = f"text '{t['str']}' on layer '{t['layer']}'"
+        desc = f"{src} at ({t['x']:,.0f}, {t['y']:,.0f}) -> horizontal line at Y = {t['y']:,.0f}"
+        if len(hits) > 1:
+            others = ", ".join(f"({h['x']:,.0f}, {h['y']:,.0f}) on '{h['layer']}'" for h in hits[1:5])
+            warn(f"{flag}: text '{label}' appears {len(hits)} times; using the largest at "
+                 f"({t['x']:,.0f}, {t['y']:,.0f}). Others: {others}. Add @LAYER to pick one.")
+        return {"kind": "h", "Y": t["y"], "src": src, "desc": desc}
+    try:
+        if low.startswith(("x=", "x:")):
+            X = float(low[2:])
+            return {"kind": "v", "X": X, "src": "option", "desc": f"vertical line at X = {X:,.0f} (typed)"}
+        if low.startswith(("y=", "y:")):
+            low = low[2:]
+        vals = [float(v) for v in re.split(r"[,;]+", low) if v]
+    except ValueError:
+        vals = []
+    if len(vals) == 1:
+        return {"kind": "h", "Y": vals[0], "src": "option", "desc": f"horizontal line at Y = {vals[0]:,.0f} (typed)"}
+    if len(vals) == 4 and math.hypot(vals[2] - vals[0], vals[3] - vals[1]) > 0:
+        return {"kind": "seg", "seg": tuple(vals), "src": "option",
+                "desc": f"line from ({vals[0]:,.0f}, {vals[1]:,.0f}) to ({vals[2]:,.0f}, {vals[3]:,.0f}) (typed)"}
+    die(f"{flag} '{spec}' not understood. Give a line as  Y  (horizontal at that drawing Y),\n"
+        "  x=X  (vertical),  X0,Y0,X1,Y1,  layer:NAME  (the object on that layer, e.g. a\n"
+        "  pathway rectangle) or  text:LABEL@LAYER  (the position of a text, e.g. a bay ID).")
+
+
+def ref_line(ref):
+    """Distance / side functions for a resolved reference."""
+    if ref["kind"] == "h":
+        Y = ref["Y"]
+        return {"dist": lambda x, y: abs(y - Y), "side": lambda x, y: (y > Y) - (y < Y), "horizontal": True}
+    if ref["kind"] == "v":
+        X = ref["X"]
+        return {"dist": lambda x, y: abs(x - X), "side": lambda x, y: (x > X) - (x < X), "horizontal": False}
+    x0, y0, x1, y1 = ref["seg"]
+    L = math.hypot(x1 - x0, y1 - y0)
+    cross = lambda x, y: ((x1 - x0) * (y - y0) - (y1 - y0) * (x - x0)) / L
+    # left of the segment's direction is north for a west->east segment,
+    # east for a north->south one: normalise so +1 means north / east
+    flip = -1 if (x1 < x0 or (x1 == x0 and y1 < y0)) else 1
+    if abs(y1 - y0) > abs(x1 - x0):
+        flip = -flip
+    return {"dist": lambda x, y: abs(cross(x, y)),
+            "side": lambda x, y: (1 if cross(x, y) * flip > 0 else -1 if cross(x, y) * flip < 0 else 0),
+            "horizontal": abs(y1 - y0) <= abs(x1 - x0)}
+
+
+HALF_PLANES = {"north-of": ("north", 1, True), "south-of": ("south", -1, True),
+               "east-of": ("east", 1, False), "west-of": ("west", -1, False),
+               "above": ("north", 1, True), "below": ("south", -1, True)}
+
+
+def parse_prefer(spec, dwg=None):
     """--prefer: where the scheduled tools are, when a label is placed more
     than once. Returns None or {"key": sort key over a centre (x, y),
-    "inside": point test or None, "desc": text} -- placements are consumed
-    in that order in type mode."""
+    "inside": point test or None, "desc": text, "ref": drawing anchor or
+    None} -- placements are consumed in that order in type mode."""
     if not spec or not str(spec).strip():
         return None
-    s = PREFER_ALIASES.get(str(spec).strip().lower(), str(spec).strip().lower())
+    raw = str(spec).strip()
+    s = PREFER_ALIASES.get(raw.lower(), raw.lower())
     if s in PREFER_DIRS:
         key, desc = PREFER_DIRS[s]
-        return {"key": key, "inside": None, "desc": desc, "dir": s}
+        return {"key": key, "inside": None, "desc": desc, "dir": s, "ref": None}
+    head, sep, rest = raw.partition("=")
+    hp = HALF_PLANES.get(head.strip().lower().replace("_", "-")) if sep else None
+    if hp:
+        if dwg is None:
+            die(f"--prefer '{spec}' needs the drawing to resolve its reference.")
+        name, want, horizontal = hp
+        ref = resolve_ref(dwg, rest, "--prefer")
+        line = ref_line(ref)
+        if line["horizontal"] != horizontal:
+            die(f"--prefer '{spec}': '{head.strip()}' needs a "
+                f"{'horizontal' if horizontal else 'vertical'} line, but the reference is "
+                f"{'vertical' if line['horizontal'] is False else 'horizontal'}: {ref['desc']}")
+        inside = lambda x, y: line["side"](x, y) == want
+        return {"key": lambda x, y: (0 if inside(x, y) else 1, x, y), "inside": inside,
+                "desc": f"{name} of {ref['src']} first", "ref": ref, "dir": None,
+                "miss": f"not {name} of {ref['src']}"}
     try:
         vals = [float(v) for v in re.split(r"[,;\s]+", s) if v]
     except ValueError:
         vals = []
     if len(vals) != 4:
-        die(f"--prefer '{spec}' not understood. Use north | south | east | west, or a\n"
-            "  rectangle in drawing units: --prefer X0,Y0,X1,Y1  (AutoCAD ID command\n"
-            "  shows coordinates; --inspect prints where the block inserts are).")
+        die(f"--prefer '{spec}' not understood. Use north | south | east | west, a rectangle\n"
+            "  in drawing units X0,Y0,X1,Y1, or a half of the fab measured from a drawing\n"
+            "  object: north-of=text:XPH-D@BAY-ID, south-of=layer:NAME, north-of=Y  (AutoCAD\n"
+            "  ID shows coordinates; --inspect lists layers, texts and where the inserts are).")
     x0, x1 = sorted((vals[0], vals[2]))
     y0, y1 = sorted((vals[1], vals[3]))
     inside = lambda x, y: x0 <= x <= x1 and y0 <= y <= y1
-    return {"key": lambda x, y: (0 if inside(x, y) else 1, x, y), "inside": inside,
-            "desc": f"inside ({x0:,.0f}, {y0:,.0f})-({x1:,.0f}, {y1:,.0f}) first"}
+    return {"key": lambda x, y: (0 if inside(x, y) else 1, x, y), "inside": inside, "ref": None,
+            "desc": f"inside ({x0:,.0f}, {y0:,.0f})-({x1:,.0f}, {y1:,.0f}) first",
+            "miss": "outside the --prefer rectangle"}
 
 
-def parse_aisle(spec):
-    """--aisle: the passageway tools are brought in through. Y (horizontal
-    at that drawing Y), x=X (vertical) or X0,Y0,X1,Y1 (any line). Returns
-    None or {"dist": distance of (x, y) from the line, "side": +1 / -1 for
-    the north-or-east / south-or-west side, "horizontal", "desc"}."""
+def parse_aisle(spec, dwg=None):
+    """--aisle: the passageway tools are brought in through -- a drawing
+    coordinate (Y, x=X, X0,Y0,X1,Y1) or a drawing object (layer:NAME,
+    text:LABEL@LAYER). Returns None or {"dist", "side", "horizontal",
+    "desc", "ref"}."""
     if spec is None or not str(spec).strip():
         return None
-    s = str(spec).strip().lower().replace(" ", "")
-    try:
-        if s.startswith(("x=", "x:")):
-            X = float(s[2:])
-            return {"dist": lambda x, y: abs(x - X), "side": lambda x, y: (x > X) - (x < X),
-                    "horizontal": False, "desc": f"the passageway at X = {X:,.0f}"}
-        if s.startswith(("y=", "y:")):
-            s = s[2:]
-        vals = [float(v) for v in re.split(r"[,;]+", s) if v]
-    except ValueError:
-        vals = []
-    if len(vals) == 1:
-        Y = vals[0]
-        return {"dist": lambda x, y: abs(y - Y), "side": lambda x, y: (y > Y) - (y < Y),
-                "horizontal": True, "desc": f"the passageway at Y = {Y:,.0f}"}
-    if len(vals) == 4:
-        x0, y0, x1, y1 = vals
-        L = math.hypot(x1 - x0, y1 - y0)
-        if L > 0:
-            cross = lambda x, y: ((x1 - x0) * (y - y0) - (y1 - y0) * (x - x0)) / L
-            # left of the segment's direction is north for a west->east segment,
-            # east for a north->south one: normalise so +1 means north / east
-            flip = -1 if (x1 < x0 or (x1 == x0 and y1 < y0)) else 1
-            if abs(y1 - y0) > abs(x1 - x0):          # mostly vertical: +1 = east
-                flip = -flip
-            return {"dist": lambda x, y: abs(cross(x, y)),
-                    "side": lambda x, y: (1 if cross(x, y) * flip > 0 else -1 if cross(x, y) * flip < 0 else 0),
-                    "horizontal": abs(y1 - y0) <= abs(x1 - x0),
-                    "desc": f"the passageway from ({x0:,.0f}, {y0:,.0f}) to ({x1:,.0f}, {y1:,.0f})"}
-    die(f"--aisle '{spec}' not understood. Give the passageway as  --aisle Y  (horizontal, at\n"
-        "  that drawing Y),  --aisle x=X  (vertical), or  --aisle X0,Y0,X1,Y1  (a line).")
+    if dwg is None:
+        die("--aisle needs the drawing to resolve its reference.")
+    ref = resolve_ref(dwg, spec, "--aisle")
+    line = ref_line(ref)
+    if ref["kind"] == "h":
+        short = f"the passageway at Y = {ref['Y']:,.0f}"
+    elif ref["kind"] == "v":
+        short = f"the passageway at X = {ref['X']:,.0f}"
+    else:
+        x0, y0, x1, y1 = ref["seg"]
+        short = f"the passageway from ({x0:,.0f}, {y0:,.0f}) to ({x1:,.0f}, {y1:,.0f})"
+    if ref["src"] != "option":
+        short += f" ({ref['src']})"
+    line.update({"desc": short, "ref": ref})
+    return line
 
 
-def placement_policy(args):
+def placement_policy(args, dwg=None):
     """How a row picks among several placements of its label (type mode):
     --tool-layer placements first, then the --prefer order, then -- with
     --aisle -- the copy farthest from the passageway (each side fills from
     its far end towards the aisle), then west to east / south to north.
     None when no option is given."""
-    prefer = parse_prefer(getattr(args, "prefer", None))
-    aisle = parse_aisle(getattr(args, "aisle", None))
+    prefer = parse_prefer(getattr(args, "prefer", None), dwg)
+    aisle = parse_aisle(getattr(args, "aisle", None), dwg)
     layers = [l for l in (getattr(args, "tool_layer", None) or []) if str(l).strip()]
     if not prefer and not layers and not aisle:
         return None
@@ -2606,7 +2753,7 @@ def placement_policy(args):
         if on_layer and not on_layer(h):
             out.append("not on --tool-layer")
         if prefer and prefer["inside"] and not prefer["inside"](*hit_centre(h)):
-            out.append("outside the --prefer rectangle")
+            out.append(prefer.get("miss", "outside the --prefer rectangle"))
         return out
 
     parts = []
@@ -2620,8 +2767,14 @@ def placement_policy(args):
     if aisle:
         parts.append(f"farthest from {aisle['desc']} first (each side fills from its far end "
                      f"towards the passageway)")
+    # the drawing anchors this run depends on, for the run header and the viewer
+    anchors = []
+    if prefer and prefer.get("ref"):
+        anchors.append({"role": "--prefer " + str(getattr(args, "prefer", "")), "ref": prefer["ref"]})
+    if aisle:
+        anchors.append({"role": "--aisle " + str(getattr(args, "aisle", "")), "ref": aisle["ref"]})
     return {"key": key, "misses": misses, "desc": ", then ".join(parts),
-            "restricts": bool(layers or (prefer and prefer["inside"]))}
+            "restricts": bool(layers or (prefer and prefer["inside"])), "anchors": anchors}
 
 
 def _box_geom(b):
@@ -2770,7 +2923,7 @@ def match_rows(dwg: Drawing, rows, strategy, args):
             matched.append((row, g, b, hit))
 
     by_type = bool(getattr(args, "type_col", None))
-    policy = placement_policy(args)
+    policy = placement_policy(args, dwg)
     if by_type:
         # a label placed several times: rows take its placements in a fixed
         # positional order (west to east, south to north), or in the order
@@ -3684,6 +3837,17 @@ def build_payload(dwg: Drawing, rows, strategy, args):
               f"reduced to their footprint outline (keep everything with --block-detail full)")
 
     fields, color_by = field_list(rows, m["by_type"], args)
+    ref_lines = []
+    for a in getattr(args, "anchors", None) or []:
+        r = a["ref"]
+        if r["kind"] == "h":
+            seg = (bounds[0], -r["Y"], bounds[2], -r["Y"])
+        elif r["kind"] == "v":
+            seg = (r["X"], bounds[1], r["X"], bounds[3])
+        else:
+            x0, y0, x1, y1 = r["seg"]
+            seg = (x0, -y0, x1, -y1)
+        ref_lines.append({"n": f"{a['role']}: {r['desc']}", "seg": [Prec.r(v) for v in seg]})
     payload = {
         "title": args.title or "Fab Move-In Simulator",
         "subtitle": f"{os.path.basename(args.dxf)} + {os.path.basename(args.schedule)}"
@@ -3705,6 +3869,7 @@ def build_payload(dwg: Drawing, rows, strategy, args):
         "unmatchedTotal": len(m["unmatched"]),
         "conflicts": conflicts,
         "storage": storage,
+        "refLines": ref_lines,
         "arrivalLabel": rows[0].get("arrive_label", "") if rows else "",
         "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
@@ -4040,16 +4205,17 @@ def build_parser():
                    help="type mode: which placement a row takes when its label appears "
                         "several times in the drawing -- north | south | east | west "
                         "(that side first; north = higher Y), or a rectangle in drawing "
-                        "units X0,Y0,X1,Y1 (placements inside it first). Use it when the "
-                        "schedule covers one part of the fab and the same labels also "
-                        "exist elsewhere")
+                        "units X0,Y0,X1,Y1 (placements inside it first), or a half of the fab "
+                        "measured from a drawing object: north-of=text:XPH-D@BAY-ID, "
+                        "south-of=layer:NAME, north-of=Y. Use it when the schedule covers one "
+                        "part of the fab and the same labels also exist elsewhere")
     g.add_argument("--aisle", metavar="WHERE",
-                   help="type mode: the passageway tools are brought in through -- Y (a "
-                        "horizontal aisle at that drawing Y), x=X (vertical) or X0,Y0,X1,Y1 "
-                        "(any line). Copies of a label farthest from it are taken first, so "
-                        "the area north of the aisle fills north to south and the area south "
-                        "of it south to north. With --prefer north|south|east|west that side "
-                        "of the aisle is filled first")
+                   help="type mode: the passageway tools are brought in through -- layer:NAME "
+                        "(the pathway object on that layer), text:LABEL@LAYER (a text on it), "
+                        "or coordinates Y | x=X | X0,Y0,X1,Y1. Copies of a label farthest from "
+                        "it are taken first, so the area north of the aisle fills north to "
+                        "south and the area south of it south to north. With --prefer "
+                        "north|south|east|west that side of the aisle is filled first")
 
     g = ap.add_argument_group("move-in conflicts (detected and marked by default)")
     g.add_argument("--conflict-window", type=int, default=3, metavar="DAYS",
@@ -4401,9 +4567,15 @@ def main(argv=None):
 
     strategy = choose_strategy(dwg, match_keys, args.match)
     print(f"  Matching on : {strategy[0]}")
-    policy = placement_policy(args)
+    policy = placement_policy(args, dwg)
+    args.anchors = policy["anchors"] if policy else []
     if policy and cols["type"] >= 0:
         print(f"  Placements  : {policy['desc']}")
+        for a in policy["anchors"]:
+            print(f"  Anchor      : {a['role']}  =  {a['ref']['desc']}")
+        if policy["anchors"]:
+            print("                (read from the drawing on every run; if the DXF changes, "
+                  "re-point these options -- see HANDOVER.md, 'Drawing anchors')")
         for lay in args.tool_layer:
             if not any(layer_wanted(i["layer"], [lay], []) for i in dwg.inserts):
                 warn(f"--tool-layer '{lay}' matches no block insert in the drawing "

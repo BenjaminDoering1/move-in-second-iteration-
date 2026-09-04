@@ -221,13 +221,22 @@ def make_aisle(d):
     msp = doc.modelspace()
     for n in ("WALLS", "TOOLS"):
         doc.layers.add(n)
+    for n in ("00_Dummy", "BAY-ID"):
+        doc.layers.add(n)
     msp.add_lwpolyline([(0, 0), (3000, 0), (3000, 2000), (0, 2000)], close=True, dxfattribs={"layer": "WALLS"})
     msp.add_line((0, 1000), (3000, 1000), dxfattribs={"layer": "WALLS"})
+    # the pathway object (a rectangle 940..1060) on its own layer, as in the real floor3
+    msp.add_lwpolyline([(100, 940), (2900, 940), (2900, 1060), (100, 1060)], close=True,
+                       dxfattribs={"layer": "00_Dummy"})
+    # the bay ID text that marks the split between the upper and the lower fab
+    msp.add_text("XPH-D", dxfattribs={"height": 20, "layer": "BAY-ID"}).set_placement((1500, 250))
+    msp.add_text("XPH-D", dxfattribs={"height": 5, "layer": "NOTES"}).set_placement((2800, 1900))  # a smaller stray copy
     b = doc.blocks.new("A$CAISLE001")
     b.add_lwpolyline([(0, 0), (30, 0), (30, 18), (0, 18)], close=True)
     b.add_text("DT_112", dxfattribs={"height": 4}).set_placement((15, 9))
     for y in (1200, 1400, 1600, 800, 600, 400):      # north area rows, then south area rows
         msp.add_blockref("A$CAISLE001", (1000, y), dxfattribs={"layer": "TOOLS"})
+    msp.add_blockref("A$CAISLE001", (1000, 100), dxfattribs={"layer": "TOOLS"})   # lower fab copy
     doc.saveas(os.path.join(d, "ai.dxf"))
     start = dt.date(2026, 8, 3)
     xlsx(os.path.join(d, "ai.xlsx"), ["Block_ID", "Move In Date"],
@@ -574,32 +583,59 @@ def scenario_aisle(d):
 
     code, log = run(*base, "--trace", "DT_112", "-o", out)
     ys = order(payload(out))
-    check("default order ignores the passageway", ys == [409, 609, 809, 1209, 1409, 1609], str(ys))
+    check("default order ignores the passageway", ys == [109, 409, 609, 809, 1209, 1409], str(ys))
 
     code, log = run(*base, "--aisle", "1000", "--trace", "DT_112", "-o", out)
     ys = order(payload(out))
     north = [y for y in ys if y > 1000]; south = [y for y in ys if y < 1000]
     check("--aisle: north area fills north to south", north == sorted(north, reverse=True), str(ys))
     check("--aisle: south area fills south to north", south == sorted(south), str(ys))
-    check("--aisle: farthest copies first overall", ys[:2] == [409, 1609] or ys[:2] == [1609, 409], str(ys))
+    check("--aisle: farthest copies first overall", ys[0] == 109 and 1609 in ys[:3], str(ys))
     check("--aisle reported", "Placements  : farthest from the passageway at Y = 1,000 first" in log
           and "order    : farthest from" in log, log[-900:])
 
     code, log = run(*base, "--aisle", "y=1000", "--prefer", "north", "-o", out)
     ys = order(payload(out))
     check("--prefer north + --aisle: north side first, north to south, then south to north",
-          ys == [1609, 1409, 1209, 409, 609, 809], str(ys))
+          ys == [1609, 1409, 1209, 109, 409, 609], str(ys))
     check("combined order reported", "the north side of the passageway at Y = 1,000 first, then farthest" in log, log[-700:])
 
     code, log = run(*base, "--aisle", "0,1000,3000,1000", "--prefer", "0,1000,3000,2000", "-o", out)
     ys = order(payload(out))
     check("--prefer rectangle + --aisle line: inside first, far end first",
-          ys == [1609, 1409, 1209, 409, 609, 809], str(ys))
+          ys == [1609, 1409, 1209, 109, 409, 609], str(ys))
 
     code, log = run(*base, "--aisle", "x=1000", "-o", out)
     ys = order(payload(out))
     check("vertical aisle: all copies at X=1015 tie, default order breaks the tie",
-          ys == [409, 609, 809, 1209, 1409, 1609], str(ys))
+          ys == [109, 409, 609, 809, 1209, 1409], str(ys))
+
+    # --- drawing anchors: the pathway object on its layer and the bay-ID text
+    code, log = run(*base, "--aisle", "layer:00_Dummy", "--prefer", "north-of=text:XPH-D@BAY-ID",
+                    "--trace", "DT_112", "-o", out)
+    P = payload(out)
+    ys = order(P)
+    check("anchors: upper fab first (north-of the bay text), each area from its far end",
+          ys == [1609, 409, 1409, 609, 1209, 809] or ys == [409, 1609, 609, 1409, 809, 1209], str(ys))
+    check("anchors printed in the run header",
+          "Anchor      : --aisle layer:00_Dummy  =  layer '00_Dummy': 1 object(s), extent X 100..2,900 Y 940..1,060 -> horizontal line at Y = 1,000" in log
+          and "Anchor      : --prefer north-of=text:XPH-D@BAY-ID  =  text 'XPH-D' on layer 'BAY-ID' at (1,500, 250)" in log
+          and "re-point these options" in log, log[-1500:])
+    check("order line names the anchors", "north of text 'XPH-D' on layer 'BAY-ID' first, then farthest from the passageway at Y = 1,000 (layer '00_Dummy')" in log, log[-1200:])
+    check("lower-fab copy marked OUT in the trace", "(1,015.0, 109.0) on 'TOOLS' OUT" in log, log[-1500:])
+    check("reference lines in the payload for the viewer", len(P["refLines"]) == 2
+          and all(r["seg"][1] == r["seg"][3] for r in P["refLines"])
+          and any(r["seg"][1] == -1000 for r in P["refLines"]) and any(r["seg"][1] == -250 for r in P["refLines"]), str(P["refLines"]))
+
+    code, log = run(*base, "--prefer", "north-of=text:XPH-D", "-o", out)
+    check("ambiguous text warned, largest used", "appears 2 times" in log and "using the largest at (1,500, 250)" in log, log[-800:])
+    code, log = run(*base, "--aisle", "layer:NOPE", "-o", out)
+    check("missing anchor layer stops the run", code != 0 and "no layer 'NOPE'" in log and "--inspect lists all layers" in log, log[-500:])
+    code, log = run(*base, "--prefer", "north-of=text:XPH-Z@BAY-ID", "-o", out)
+    check("missing anchor text stops the run with candidates", code != 0 and "no text 'XPH-Z' on layer 'BAY-ID'" in log
+          and "Texts on that layer: XPH-D" in log, log[-600:])
+    code, log = run(*base, "--prefer", "east-of=text:XPH-D@BAY-ID", "-o", out)
+    check("orientation mismatch rejected", code != 0 and "needs a vertical line" in log, log[-500:])
 
     code, log = run(*base, "--aisle", "north", "-o", out)
     check("bad --aisle rejected", code != 0 and "not understood" in log)

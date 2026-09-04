@@ -1,6 +1,6 @@
 # Fab Move-In Simulator: Handover
 
-Status as of 4 September 2026, script version 1.12.0.
+Status as of 4 September 2026, script version 1.13.0.
 
 ## What it is
 
@@ -15,7 +15,7 @@ double-clicking and works offline. There is no server, no upload, no account.
 | Item | Location |
 |---|---|
 | Source | GitHub repository `BenjaminDoering1/Fab-move-in-simulator-` (private), branch `main` |
-| Current version | 1.12.0 (4 Sep 2026), on branch `claude/move-in-conflicts-storage-v9dvth` until merged into `main`. |
+| Current version | 1.13.0 (4 Sep 2026), on branch `claude/move-in-conflicts-storage-v9dvth` until merged into `main`. |
 | The tool | `fab_movein.py`, the only file a user needs |
 | Developer notes | `CLAUDE.md` (architecture, performance invariants) |
 | Regression tests | `tests/run_tests.py` |
@@ -72,14 +72,41 @@ on the layer `0_ENG 3K tool` (the same labels also exist in the south half):
 python fab_movein.py --dxf data\floor3.dxf --schedule data\move_in_plan.xlsx --type-col Block_ID --tool-layer "0_ENG 3K tool" --prefer north -o floor3_simulation.html
 ```
 
-The ENG line has two areas with the move-in passageway between them. Tools
-north of the passageway go in north to south, tools south of it south to
-north, so add `--aisle Y` with the passageway's drawing Y (AutoCAD `ID` on
-its centreline; `--inspect` prints the Y range of the inserts):
+The ENG line (upper fab, floor 3) has two areas with the move-in passageway
+between them. Tools north of the passageway go in north to south, tools
+south of it south to north. Both boundaries are read from the drawing (see
+"Drawing anchors" below):
 
 ```
-python fab_movein.py --dxf data\floor3.dxf --schedule data\move_in_plan.xlsx --type-col Block_ID --tool-layer "0_ENG 3K tool" --aisle 18500 -o floor3_simulation.html
+python fab_movein.py --dxf data\floor3.dxf --schedule data\move_in_plan.xlsx --type-col Block_ID --tool-layer "0_ENG 3K tool" --prefer "north-of=text:XPH-D@BAY-ID" --aisle layer:00_Dummy -o floor3_simulation.html
 ```
+
+## Drawing anchors (floor 3) -- READ THIS WHEN THE DXF CHANGES
+
+The placement order depends on two objects in `floor3.dxf`. They are
+deliberate, simple workarounds, not features of the DXF format, and the
+script reads them fresh on every run rather than storing coordinates:
+
+| What it marks | Where it is in the drawing | Option | If the DXF changes |
+|---|---|---|---|
+| The move-in passageway between the north and the south area of the ENG line | The pathway object on layer `00_Dummy` (its extent gives a horizontal centreline) | `--aisle layer:00_Dummy` | Put the new pathway object's layer after `layer:`; or type the Y (`--aisle 18500`); or name a text on it (`--aisle text:LABEL@LAYER`) |
+| The split between the upper fab (ENG line) and the lower fab | The Y of the text `XPH-D` on layer `BAY-ID` | `--prefer "north-of=text:XPH-D@BAY-ID"` | Name another text (`north-of=text:XPH-E@BAY-ID`), a layer (`north-of=layer:NAME`) or a Y (`north-of=17800`) |
+
+How to see that they still hold:
+
+- The run prints each anchor it resolved, with the object it found and the
+  line it derived, for example
+  `Anchor : --aisle layer:00_Dummy = layer '00_Dummy': 1 object(s), extent X ... -> horizontal line at Y = 18,412`.
+  If the extent or the Y looks wrong (a second object on the layer, the text
+  moved), fix the option.
+- A missing layer or text stops the run and lists similar layer names or the
+  texts on that layer. `--inspect` lists all layers, `--inspect-full` all
+  texts.
+- The viewer draws both lines dashed in orange with their option as label
+  (View menu, "Placement reference lines"), so a wrong line is visible on
+  the floor plan.
+- `--trace DT_112` marks every copy `in`/`OUT` against the anchors and prints
+  the order actually used.
 
 Then double-click the HTML file. Do not open it through a preview server
 (VS Code Live Server, Jupyter, `python -m http.server`): very large files abort
@@ -120,15 +147,20 @@ This is the knowledge that is easiest to lose.
   elsewhere (no free copy left where the options point) is named in a
   warning. `--trace LABEL` prints the order used and marks every copy
   `in`/`OUT` with its layer; `--inspect` prints where the inserts are.
-- **Move-in passageway** (1.12): `--aisle Y` (horizontal aisle at that
-  drawing Y; `x=X` for a vertical one; `X0,Y0,X1,Y1` for any line) takes the
-  copies of a label farthest from the aisle first, so the area north of it
-  fills north to south and the area south of it south to north, as tools
-  are pushed in from the aisle. Order of precedence: `--tool-layer`, then
-  `--prefer` (a rectangle = inside first; `north`/`south` combined with a
-  horizontal aisle = that side of the aisle first), then distance from the
-  aisle, then west to east. Without `--aisle`, `--prefer north` alone sorts
-  all copies north to south, which is wrong for the southern area.
+- **Move-in passageway** (1.12): `--aisle` takes the copies of a label
+  farthest from the aisle first, so the area north of it fills north to
+  south and the area south of it south to north, as tools are pushed in
+  from the aisle. Order of precedence: `--tool-layer`, then `--prefer` (a
+  rectangle or `north-of=`/`south-of=` half = inside first; `north`/`south`
+  combined with a horizontal aisle = that side of the aisle first), then
+  distance from the aisle, then west to east. Without `--aisle`, `--prefer
+  north` alone sorts all copies north to south, which is wrong for the
+  southern area.
+- **Drawing anchors** (1.13): `--aisle` and `--prefer north-of=` (also
+  `south-of=`, `east-of=`, `west-of=`) accept `layer:NAME` (the object on
+  that layer), `text:LABEL@LAYER` (a text's position) or plain coordinates
+  (`Y`, `x=X`, `X0,Y0,X1,Y1`). The run prints every resolved anchor, the
+  viewer draws them, `--trace` measures against them.
 - The matching option `blocktext` is chosen automatically; `--match blocktext`
   forces it. `--loose` ignores punctuation and spacing (`DT-112` matches
   `DT_112`); `--inspect` lists the near misses `--loose` would fix.
@@ -288,8 +320,8 @@ layer built from full equipment drawings shrank 33 times with block detail
 | `--match auto/attrib:TAG/blockname/blocktext/text` | How tools are found in the DXF |
 | `--loose` | Ignore punctuation and spacing when matching |
 | `--tool-layer NAME` | Type mode: copies of a label on this layer are taken first (repeatable, wildcards) |
-| `--prefer WHERE` | Type mode: `north`/`south`/`east`/`west` side first, or `X0,Y0,X1,Y1` rectangle first |
-| `--aisle WHERE` | Type mode: the move-in passageway (`Y`, `x=X` or `X0,Y0,X1,Y1`); copies farthest from it are taken first, each side filling towards the aisle |
+| `--prefer WHERE` | Type mode: `north`/`south`/`east`/`west` side first, `X0,Y0,X1,Y1` rectangle first, or `north-of=REF` (also south/east/west) with REF a `layer:`, `text:` or coordinate |
+| `--aisle WHERE` | Type mode: the move-in passageway (`layer:NAME`, `text:LABEL@LAYER`, `Y`, `x=X` or `X0,Y0,X1,Y1`); copies farthest from it are taken first, each side filling towards the aisle |
 | `-o`, `--title`, `--start-date`, `--end-date`, `--open` | Output file, page title, timeline clipping, open in browser |
 | `--exclude-layer`, `--only-layer` | Drop or keep drawing layers; wildcards, repeatable |
 | `--block-detail auto/full/outline/box` | How much of each block's inner geometry to keep (default auto) |
@@ -315,6 +347,7 @@ layer built from full equipment drawings shrank 33 times with block detail
 | 1.8.0, 1.8.1 | 2 Sep 2026 | `--block-detail` footprint reduction; `--layers` shows placements per layer |
 | 1.9.0 | 2 Sep 2026 | Consolidation (split functions, memoised indexes, Windows console guard) and the in-repo regression suite |
 | 1.10.0 | 3 Sep 2026 | `--tool-layer` and `--prefer`: choose which copy of a repeated label a row takes (layer, side of the fab, rectangle); `--trace` shows the order and layer, `--inspect` shows the insert extents |
+| 1.13.0 | 4 Sep 2026 | Drawing anchors: `--aisle layer:00_Dummy`, `--prefer north-of=text:XPH-D@BAY-ID`; anchors printed per run, drawn in the viewer, missing ones stop the run |
 | 1.12.0 | 4 Sep 2026 | `--aisle`: copies of a label fill from the far end of each area towards the move-in passageway (north area north to south, south area south to north) |
 | 1.11.0 | 4 Sep 2026 | Move-in conflicts detected and marked (overlap, boxed in, crowding, daily capacity, no storage); storage zones and slot assignment for delivered tools; filters by model / vendor / module / any column, colour by module |
 
@@ -346,8 +379,9 @@ layer built from full equipment drawings shrank 33 times with block detail
 4. When unique per-tool location IDs are assigned in the drawings, switch from
    type mode to ID mode. Until then, run with `--tool-layer` / `--prefer` /
    `--aisle` for the part of the fab the schedule covers (see Everyday
-   commands). The passageway Y for floor3 still has to be read off the
-   drawing (AutoCAD `ID` on the aisle centreline) and put into `--aisle`.
+   commands). The passageway and the upper/lower split come from the
+   drawing anchors above; check the `Anchor :` lines of every run after a
+   new DXF export.
 5. Optional: run `python tests\run_tests.py --no-browser` after each script
    download (about 20 seconds).
 6. Storage zones for floor1 / floor3: draw the laydown areas as closed
